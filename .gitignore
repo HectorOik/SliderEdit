@@ -24,6 +24,9 @@ wheels/
 venv/
 env/
 ENV/
+slider_env/
+local_reqs.txt
+*.whl
 
 # IDEs
 .vscode/
