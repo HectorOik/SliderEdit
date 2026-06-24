@@ -6,7 +6,7 @@ output_dir: "./experiments/gstlora_flux_kontext"
 # pretrained_model_name_or_path: "black-forest-labs/FLUX.1-Kontext-dev"
 pretrained_model_name_or_path: "stabilityai/stable-diffusion-xl-base-1.0"
 
-dataset_name: "UCSC-VLAA/HQ-Edit"
+dataset_name: "UCSC-VLAA/HQ-Edit" # default used by SliderEdit paper
 
 seed: 0
 checkpointing_steps: 2 #100
@@ -33,18 +33,15 @@ lora_dropout: 0.0
 resume_from_checkpoint: false
 max_train_steps: 2 # 100
 
-# scale down for local smoke test
-train_batch_size: 1
-gradient_accumulation_steps: 1
-
 lr_warmup_steps: 0
 learning_rate: 5e-5
 mixed_precision: "bf16"
-train_batch_size: 6
+# scale down for local smoke test
+train_batch_size: 1 # 6 
 gradient_accumulation_steps: 1
 guidance_scale: 3.5
 max_grad_norm: 1
-max_train_timesteps: 1000
+max_train_timesteps: 1000 # how many steps per denoising process
 min_train_timesteps: 0
 
 # turn off logging
