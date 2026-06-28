@@ -26,7 +26,7 @@ from accelerate.utils import DataLoaderConfiguration
 from accelerate.utils import set_seed
 from peft import LoraConfig
 from peft.utils import get_peft_model_state_dict
-
+from transformers import BitsAndBytesConfig
 
 def resize_and_center_crop(img, target_size=1024):
     w, h = img.size
@@ -53,15 +53,26 @@ def collate_fn(batch):
 
 
 def load_models(args):
+    quantization_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb4bit_compute_dtype=torch.bfloat16
+    )
+
     clip_tokenizer = CLIPTokenizer.from_pretrained(args.pretrained_model_name_or_path, subfolder="tokenizer")
     t5_tokenizer = T5TokenizerFast.from_pretrained(args.pretrained_model_name_or_path, subfolder="tokenizer_2")
 
-    clip_text_encoder = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder")
-    t5_text_encoder = T5EncoderModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder_2")
+    clip_text_encoder = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder", torch_dtype=torch.bfloat16, low_cpu_mem_usage=True).to("cuda")
+    t5_text_encoder = T5EncoderModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder_2", torch_dtype=torch.bfloat16, low_cpu_mem_usage=True).to("cuda")
 
-    vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, subfolder="vae")
+    vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, subfolder="vae").to(dtype=torch.bfloat16)
 
-    transformer = FluxTransformer2DModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="transformer")
+    transformer = FluxTransformer2DModel.from_pretrained(
+    args.pretrained_model_name_or_path,
+    subfolder="transformer",
+    quantization_config=quantization_config,
+    device_map={"": "cuda"}
+    )
 
     noise_scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
 
@@ -131,7 +142,7 @@ def get_gt_model_pred(transformer, model_input, timesteps, guidance, pooled_prom
         pooled_projections=pooled_prompt_embeds,
         encoder_hidden_states=prompt_embeds,
         txt_ids=text_ids,
-        img_ids=latent_image_ids,
+        img_ids=latent_image_ids.squeeze(0),
         return_dict=False,
     )[0]
     gt_model_pred = gt_model_pred[:, :orig_inp_shape[1]]
@@ -182,10 +193,13 @@ def get_save_model_hook(accelerator, args):
         if accelerator.is_main_process:
             for i, model in enumerate(models):
                 print("Type of model in save_model_hook:", type(model))
-                if isinstance(accelerator.unwrap_model(model), FluxTransformer2DModel):
+                unwrapped_model = accelerator.unwrap_model(model)
+
+                if hasattr(unwrapped_model, "config") or "Flux" in type(unwrapped_model).__name__:
+#                if isinstance(accelerator.unwrap_model(model), FluxTransformer2DModel):
                     FluxKontextPipeline.save_lora_weights(
                         output_dir,
-                        transformer_lora_layers=get_peft_model_state_dict(accelerator.unwrap_model(model), adapter_name=args.lora_name),
+                        transformer_lora_layers=get_peft_model_state_dict(unwrapped_model, adapter_name=args.lora_name),
                     )
                 else:
                     raise ValueError(f"Wrong model supplied: {type(model)=}.")
@@ -267,10 +281,13 @@ def main():
         m.requires_grad_(False)
     
     weight_dtype = torch.bfloat16
-    for m in [clip_text_encoder, t5_text_encoder, vae, transformer]:
-        m.to(accelerator.device, dtype=weight_dtype)
+#    for m in [clip_text_encoder, t5_text_encoder, vae, transformer]:
+       # m.to(accelerator.device, dtype=weight_dtype)
     
-    transformer.enable_gradient_checkpointing()
+    vae.to(accelerator.device)
+  #  transformer.to(accelerator.device, dtype=weight_dtype)
+
+    transformer.module.enable_gradient_checkpointing() if hasattr(transformer, "module") else transformer.enable_gradient_checkpointing()
 
     LORA_TARGET_MODULES = [
         "attn.to_k",
@@ -312,8 +329,8 @@ def main():
         num_training_steps=args.max_train_steps * accelerator.num_processes,
     )
     
-    transformer, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        transformer, optimizer, train_dataloader, lr_scheduler
+    _, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+        None, optimizer, train_dataloader, lr_scheduler
     )
 
     len_train_dataset = 197350 # This is the size of "UCSC-VLAA/HQ-Edit"
@@ -372,100 +389,110 @@ def main():
     )
     transformer.train()
 
-    for epoch in range(first_epoch, num_train_epochs):
-        for _, batch in enumerate(train_dataloader):
-            with accelerator.accumulate(transformer):
-                images = batch["images"]
-                prompts = batch["prompts"]
-                neutral_prompts = batch["neutral_prompts"]
+    try:
+        for epoch in range(first_epoch, num_train_epochs):
+            for _, batch in enumerate(train_dataloader):
+                with accelerator.accumulate(transformer):
+                    images = batch["images"]
+                    prompts = batch["prompts"]
+                    neutral_prompts = batch["neutral_prompts"]
 
-                latents, image_latents, latent_ids, image_ids = prepare_latents(pipeline, images)
-                latent_ids = torch.cat([latent_ids, image_ids], dim=1) # TODO: Check
+                    latents, image_latents, latent_ids, image_ids = prepare_latents(pipeline, images)
+                    latent_ids = torch.cat([latent_ids, image_ids], dim=1) # TODO: Check
 
-                prompt_embeds, pooled_prompt_embeds, text_ids = compute_text_embeddings(prompts, t5_tokenizer, t5_text_encoder, clip_tokenizer, clip_text_encoder)
-                neutral_prompt_embeds, neutral_pooled_prompt_embeds, neutral_text_ids = compute_text_embeddings(neutral_prompts, t5_tokenizer, t5_text_encoder, clip_tokenizer, clip_text_encoder)
+                    prompt_embeds, pooled_prompt_embeds, text_ids = compute_text_embeddings(prompts, t5_tokenizer, t5_text_encoder, clip_tokenizer, clip_text_encoder)
+                    neutral_prompt_embeds, neutral_pooled_prompt_embeds, neutral_text_ids = compute_text_embeddings(neutral_prompts, t5_tokenizer, t5_text_encoder, clip_tokenizer, clip_text_encoder)
 
-                noise = latents
-                bsz = latents.shape[0]
+                    noise = latents
+                    bsz = latents.shape[0]
 
-                # Sample a random timestep for each image for weighting schemes where we sample timesteps non-uniformly
-                u = compute_density_for_timestep_sampling(weighting_scheme="none", batch_size=bsz) # TODO: make it argument with logit_mean, logit_std, mode_scale
-                indices = (u * (args.max_train_timesteps - args.min_train_timesteps) + args.min_train_timesteps).long() # instead of noise_scheduler.config.num_train_timesteps
-                timesteps = noise_scheduler.timesteps[indices].to(device=latents.device)
+                    # Sample a random timestep for each image for weighting schemes where we sample timesteps non-uniformly
+                    u = compute_density_for_timestep_sampling(weighting_scheme="none", batch_size=bsz) # TODO: make it argument with logit_mean, logit_std, mode_scale
+                    indices = (u * (args.max_train_timesteps - args.min_train_timesteps) + args.min_train_timesteps).long() # instead of noise_scheduler.config.num_train_timesteps
+                    timesteps = noise_scheduler.timesteps[indices].to(device=latents.device)
 
-                # Add noise according to flow matching.
-                # zt = (1 - texp) * x + texp * z1
-                sigmas = get_sigmas(noise_scheduler, timesteps, device=latents.device, n_dim=latents.ndim, dtype=latents.dtype)
-                noisy_model_input = (1.0 - sigmas) * image_latents + sigmas * noise
+                    # Add noise according to flow matching.
+                    # zt = (1 - texp) * x + texp * z1
+                    sigmas = get_sigmas(noise_scheduler, timesteps, device=latents.device, n_dim=latents.ndim, dtype=latents.dtype)
+                    noisy_model_input = (1.0 - sigmas) * image_latents + sigmas * noise
 
-                # handle guidance
-                if accelerator.unwrap_model(transformer).config.guidance_embeds:
-                    guidance = torch.tensor([args.guidance_scale], device=accelerator.device)
-                    guidance = guidance.expand(latents.shape[0])
-                else:
-                    guidance = None
+                    # handle guidance
+                    if accelerator.unwrap_model(transformer).config.guidance_embeds:
+                        guidance = torch.tensor([args.guidance_scale], device=accelerator.device)
+                        guidance = guidance.expand(latents.shape[0])
+                    else:
+                        guidance = None
 
-                orig_inp_shape = noisy_model_input.shape
-                latent_model_input = torch.cat([noisy_model_input, image_latents], dim=1)
+                    orig_inp_shape = noisy_model_input.shape
+                    latent_model_input = torch.cat([noisy_model_input, image_latents], dim=1)
+            
+                    with accelerator.autocast():
+                        transformer.set_adapters([args.lora_name], [0])
+                        gt_model_pred_neutral = get_gt_model_pred(transformer, latent_model_input, timesteps, guidance, neutral_pooled_prompt_embeds, neutral_prompt_embeds, neutral_text_ids, latent_ids, orig_inp_shape)
 
-                transformer.set_adapters([args.lora_name], [0])
-                gt_model_pred_neutral = get_gt_model_pred(transformer, latent_model_input, timesteps, guidance, neutral_pooled_prompt_embeds, neutral_prompt_embeds, neutral_text_ids, latent_ids, orig_inp_shape)
+                        # Set scales
+                        transformer.set_adapters([args.lora_name], [1])
+                        model_pred = transformer(
+                            hidden_states=latent_model_input,
+                            timestep=timesteps / 1000, # YiYi notes: divide it by 1000 for now because we scale it by 1000 in the transformer model
+                            guidance=guidance,
+                            pooled_projections=pooled_prompt_embeds,
+                            encoder_hidden_states=prompt_embeds,
+                            txt_ids=text_ids,
+                            img_ids=latent_ids.squeeze(0),
+                            return_dict=False,
+                        )[0]
 
-                # Set scales
-                transformer.set_adapters([args.lora_name], [1])
-                model_pred = transformer(
-                    hidden_states=latent_model_input,
-                    timestep=timesteps / 1000, # YiYi notes: divide it by 1000 for now because we scale it by 1000 in the transformer model
-                    guidance=guidance,
-                    pooled_projections=pooled_prompt_embeds,
-                    encoder_hidden_states=prompt_embeds,
-                    txt_ids=text_ids,
-                    img_ids=latent_ids,
-                    return_dict=False,
-                )[0]
-                model_pred = model_pred[:, :orig_inp_shape[1]]
+                    model_pred = model_pred[:, :orig_inp_shape[1]]
 
-                weighting = compute_loss_weighting_for_sd3(weighting_scheme="none", sigmas=sigmas) # TODO: make it argument (same as the one used in compute_density_for_timestep_sampling)
-                target = gt_model_pred_neutral # instead of (noise - model_input)
-                loss = torch.mean(
-                    (weighting.float() * (model_pred.float() - target.float()) ** 2).reshape(target.shape[0], -1),
-                    1,
-                )
-                loss = loss.mean()
+                    weighting = compute_loss_weighting_for_sd3(weighting_scheme="none", sigmas=sigmas) # TODO: make it argument (same as the one used in compute_density_for_timestep_sampling)
+                    target = gt_model_pred_neutral # instead of (noise - model_input)
+                    loss = torch.mean(
+                        (weighting.float() * (model_pred.float() - target.float()) ** 2).reshape(target.shape[0], -1),
+                        1,
+                    )
+                    loss = loss.mean()
 
-                accelerator.backward(loss)
+                    # force autograd to keep the tracking chain alive
+                    loss.requires_grad_(True)
+
+                    accelerator.backward(loss)
+
+                    if accelerator.sync_gradients:
+                        accelerator.clip_grad_norm_(transformer.parameters(), args.max_grad_norm)
+
+                    optimizer.step()
+                    lr_scheduler.step()
+                    optimizer.zero_grad()
 
                 if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(transformer.parameters(), args.max_grad_norm)
+                    progress_bar.update(1)
+                    global_step += 1
 
-                optimizer.step()
-                lr_scheduler.step()
-                optimizer.zero_grad()
+                    if accelerator.is_main_process:
+                        if global_step % args.checkpointing_steps == 0 or global_step == args.max_train_steps:
+                            save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+                            accelerator.save_state(save_path)
+                            print(f"Saved state to {save_path}")
 
-            if accelerator.sync_gradients:
-                progress_bar.update(1)
-                global_step += 1
+                        if global_step % args.validation_steps == 0 or global_step == args.max_train_steps:
+                            with accelerator.autocast():
+                                pipeline.transformer = accelerator.unwrap_model(transformer, keep_fp32_wrapper=False)
+                                log_validation(pipeline, args, accelerator)
+                            transformer.train()
+                            # TODO: Check if the trainable params are in float32
 
-                if accelerator.is_main_process:
-                    if global_step % args.checkpointing_steps == 0 or global_step == args.max_train_steps:
-                        save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
-                        accelerator.save_state(save_path)
-                        print(f"Saved state to {save_path}")
+                    logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
+                    progress_bar.set_postfix(**logs)
+                    accelerator.log(logs, step=global_step)
 
-                    if global_step % args.validation_steps == 0 or global_step == args.max_train_steps:
-                        pipeline.transformer = accelerator.unwrap_model(transformer, keep_fp32_wrapper=False)
-                        log_validation(pipeline, args, accelerator)
-                        transformer.train()
-                        # TODO: Check if the trainable params are in float32
-
-            logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
-            progress_bar.set_postfix(**logs)
-            accelerator.log(logs, step=global_step)
-
-            if global_step >= args.max_train_steps:
-                break    
-
+                if global_step >= args.max_train_steps:
+                    break    
+    except KeyboardInterrupt:
+        print("\n[!] Training gracefully stopped by user via Ctrl+C. Exiting safely...")
+   
     accelerator.end_training()
+    return
 
 if __name__ == "__main__":
     main()

@@ -57,3 +57,6 @@ wandb/
 # OS
 .DS_Store
 Thumbs.db
+experiments/
+*.bin
+*.pkl

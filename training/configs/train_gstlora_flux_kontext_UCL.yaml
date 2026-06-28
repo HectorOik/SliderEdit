@@ -1,13 +1,13 @@
 tracker_name: slider-edit
-wandb_run_name: "gstlora_flux_kontext"
+wandb_run_name: "gstlora_flux_kontext_run1"
 
 output_dir: "./experiments/gstlora_flux_kontext"
 pretrained_model_name_or_path: "black-forest-labs/FLUX.1-Kontext-dev"
 dataset_name: "UCSC-VLAA/HQ-Edit"
 
 seed: 0
-checkpointing_steps: 100
-validation_steps: 100
+checkpointing_steps: 50
+validation_steps: 1000
 validation_prompts:
   - "make the skin of the person dark"
   - "make the hair of the person curly"
@@ -27,8 +27,8 @@ validation_lora_scales: [-1.5, -1, -0.75, -0.5, -0.25, 0, 0.25, 0.5, 0.75, 1, 1.
 lora_rank: 16
 lora_dropout: 0.0
 
-resume_from_checkpoint: false
-max_train_steps: 1000
+resume_from_checkpoint: true
+max_train_steps: 351
 
 lr_warmup_steps: 0
 learning_rate: 5e-5
@@ -43,3 +43,8 @@ guidance_scale: 3.5
 max_grad_norm: 1
 max_train_timesteps: 1000
 min_train_timesteps: 0
+
+#quantize_text_encoder: true
+#quantize_transformer: true
+
+#load_in_8bit: true
