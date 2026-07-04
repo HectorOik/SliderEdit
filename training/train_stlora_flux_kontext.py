@@ -30,6 +30,7 @@ from accelerate.utils import set_seed
 import itertools
 import random
 from diffusers.utils import make_image_grid
+from transformers import BitsAndBytesConfig
 
 from slideredit.pipelines import SliderEditFluxKontextPipeline, LoRAAdapterType
 
@@ -83,16 +84,53 @@ def collate_fn(batch):
     }
 
 
+# def load_models(args):
+#     clip_tokenizer = CLIPTokenizer.from_pretrained(args.pretrained_model_name_or_path, subfolder="tokenizer")
+#     t5_tokenizer = T5TokenizerFast.from_pretrained(args.pretrained_model_name_or_path, subfolder="tokenizer_2")
+
+#     clip_text_encoder = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder")
+#     t5_text_encoder = T5EncoderModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder_2")
+
+#     vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, subfolder="vae")
+
+#     transformer = FluxTransformer2DModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="transformer")
+
+#     noise_scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
+
+#     return clip_tokenizer, t5_tokenizer, clip_text_encoder, t5_text_encoder, vae, transformer, noise_scheduler
+
+# replaced above function entirely to allow for 4-bit NF4 quantization
 def load_models(args):
     clip_tokenizer = CLIPTokenizer.from_pretrained(args.pretrained_model_name_or_path, subfolder="tokenizer")
     t5_tokenizer = T5TokenizerFast.from_pretrained(args.pretrained_model_name_or_path, subfolder="tokenizer_2")
 
-    clip_text_encoder = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder")
-    t5_text_encoder = T5EncoderModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder_2")
+    # Quantization settings for the massive transformer core
+    quantization_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.bfloat16
+    )
 
-    vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, subfolder="vae")
+    # Load text encoders and VAE in bfloat16 directly to GPU memory
+    clip_text_encoder = CLIPTextModel.from_pretrained(
+        args.pretrained_model_name_or_path, subfolder="text_encoder", torch_dtype=torch.bfloat16, low_cpu_mem_usage=True
+    ).to("cuda")
+    
+    t5_text_encoder = T5EncoderModel.from_pretrained(
+        args.pretrained_model_name_or_path, subfolder="text_encoder_2", torch_dtype=torch.bfloat16, low_cpu_mem_usage=True
+    ).to("cuda")
 
-    transformer = FluxTransformer2DModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="transformer")
+    vae = AutoencoderKL.from_pretrained(
+        args.pretrained_model_name_or_path, subfolder="vae"
+    ).to(device="cuda", dtype=torch.bfloat16)
+
+    # Apply 4-bit quantization layout onto the main transformer
+    transformer = FluxTransformer2DModel.from_pretrained(
+        args.pretrained_model_name_or_path,
+        subfolder="transformer",
+        quantization_config=quantization_config,
+        device_map={"": "cuda"}
+    )
 
     noise_scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
 
@@ -310,10 +348,15 @@ def main():
         m.requires_grad_(False)
     
     weight_dtype = torch.bfloat16
-    for m in [clip_text_encoder, t5_text_encoder, vae, transformer]:
-        m.to(accelerator.device, dtype=weight_dtype)
+    # for m in [clip_text_encoder, t5_text_encoder, vae, transformer]:
+    #     m.to(accelerator.device, dtype=weight_dtype)
     
-    transformer.enable_gradient_checkpointing()
+    # transformer.enable_gradient_checkpointing()
+    vae.to(accelerator.device)
+    if hasattr(transformer, "module"):
+        transformer.module.enable_gradient_checkpointing()
+    else:
+        transformer.enable_gradient_checkpointing()
 
     LORA_TARGET_MODULES = [
         "attn.add_k_proj",
@@ -359,8 +402,9 @@ def main():
         num_training_steps=args.max_train_steps * accelerator.num_processes,
     )
 
-    transformer, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        transformer, optimizer, train_dataloader, lr_scheduler
+    # removed transformer
+    _, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+        None, optimizer, train_dataloader, lr_scheduler
     )
 
     len_train_dataset = len(train_dataset)
@@ -420,107 +464,112 @@ def main():
     pipeline.loaded_adapter = LoRAAdapterType.STLORA
     transformer.train()
 
-    for epoch in range(first_epoch, num_train_epochs):
-        for _, batch in enumerate(train_dataloader):
-            with accelerator.accumulate(transformer):
-                images = batch["images"]
-                orig_edit_prompts = batch["orig_edit_prompts"]
-                instructions_to_apply_prompts = batch["instructions_to_apply_prompts"]
-                instructions_to_suppress = batch["instructions_to_suppress"]
+    try:
+        for epoch in range(first_epoch, num_train_epochs):
+            for _, batch in enumerate(train_dataloader):
+                with accelerator.accumulate(transformer):
+                    images = batch["images"]
+                    orig_edit_prompts = batch["orig_edit_prompts"]
+                    instructions_to_apply_prompts = batch["instructions_to_apply_prompts"]
+                    instructions_to_suppress = batch["instructions_to_suppress"]
 
-                latents, image_latents, latent_ids, image_ids = prepare_latents(pipeline, images)
-                latent_ids = torch.cat([latent_ids, image_ids], dim=1) # TODO: Check
+                    latents, image_latents, latent_ids, image_ids = prepare_latents(pipeline, images)
+                    latent_ids = torch.cat([latent_ids, image_ids], dim=1) # TODO: Check
 
-                prompt_embeds, pooled_prompt_embeds, text_ids = compute_text_embeddings(orig_edit_prompts, t5_tokenizer, t5_text_encoder, clip_tokenizer, clip_text_encoder)
-                neutral_prompt_embeds, neutral_pooled_prompt_embeds, neutral_text_ids = compute_text_embeddings(instructions_to_apply_prompts, t5_tokenizer, t5_text_encoder, clip_tokenizer, clip_text_encoder)
+                    prompt_embeds, pooled_prompt_embeds, text_ids = compute_text_embeddings(orig_edit_prompts, t5_tokenizer, t5_text_encoder, clip_tokenizer, clip_text_encoder)
+                    neutral_prompt_embeds, neutral_pooled_prompt_embeds, neutral_text_ids = compute_text_embeddings(instructions_to_apply_prompts, t5_tokenizer, t5_text_encoder, clip_tokenizer, clip_text_encoder)
 
-                noise = latents
-                bsz = latents.shape[0]
+                    noise = latents
+                    bsz = latents.shape[0]
 
-                # Sample a random timestep for each image for weighting schemes where we sample timesteps non-uniformly
-                u = compute_density_for_timestep_sampling(weighting_scheme="none", batch_size=bsz) # TODO: make it argument with logit_mean, logit_std, mode_scale
-                indices = (u * (args.max_train_timesteps - args.min_train_timesteps) + args.min_train_timesteps).long() # instead of noise_scheduler.config.num_train_timesteps
-                timesteps = noise_scheduler.timesteps[indices].to(device=latents.device)
+                    # Sample a random timestep for each image for weighting schemes where we sample timesteps non-uniformly
+                    u = compute_density_for_timestep_sampling(weighting_scheme="none", batch_size=bsz) # TODO: make it argument with logit_mean, logit_std, mode_scale
+                    indices = (u * (args.max_train_timesteps - args.min_train_timesteps) + args.min_train_timesteps).long() # instead of noise_scheduler.config.num_train_timesteps
+                    timesteps = noise_scheduler.timesteps[indices].to(device=latents.device)
 
-                # Add noise according to flow matching.
-                # zt = (1 - texp) * x + texp * z1
-                sigmas = get_sigmas(noise_scheduler, timesteps, device=latents.device, n_dim=latents.ndim, dtype=latents.dtype)
-                noisy_model_input = (1.0 - sigmas) * image_latents + sigmas * noise
+                    # Add noise according to flow matching.
+                    # zt = (1 - texp) * x + texp * z1
+                    sigmas = get_sigmas(noise_scheduler, timesteps, device=latents.device, n_dim=latents.ndim, dtype=latents.dtype)
+                    noisy_model_input = (1.0 - sigmas) * image_latents + sigmas * noise
 
-                # handle guidance
-                if accelerator.unwrap_model(transformer).config.guidance_embeds:
-                    guidance = torch.tensor([args.guidance_scale], device=accelerator.device)
-                    guidance = guidance.expand(latents.shape[0])
-                else:
-                    guidance = None 
+                    # handle guidance
+                    if accelerator.unwrap_model(transformer).config.guidance_embeds:
+                        guidance = torch.tensor([args.guidance_scale], device=accelerator.device)
+                        guidance = guidance.expand(latents.shape[0])
+                    else:
+                        guidance = None 
 
-                orig_inp_shape = noisy_model_input.shape
-                latent_model_input = torch.cat([noisy_model_input, image_latents], dim=1)
+                    orig_inp_shape = noisy_model_input.shape
+                    latent_model_input = torch.cat([noisy_model_input, image_latents], dim=1)
 
-                gt_model_pred_neutral = get_gt_model_pred(transformer, latent_model_input, timesteps, guidance, neutral_pooled_prompt_embeds, neutral_prompt_embeds, neutral_text_ids, latent_ids, orig_inp_shape)
+                    gt_model_pred_neutral = get_gt_model_pred(transformer, latent_model_input, timesteps, guidance, neutral_pooled_prompt_embeds, neutral_prompt_embeds, neutral_text_ids, latent_ids, orig_inp_shape)
 
-                # Set scales
-                for m in pipeline.transformer.modules():
-                    if isinstance(m, SelectiveLoRALinear):
-                        m.reset_scaling()
+                    # Set scales
+                    for m in pipeline.transformer.modules():
+                        if isinstance(m, SelectiveLoRALinear):
+                            m.reset_scaling()
 
-                # Set mask
-                tokens_mask = torch.zeros((bsz, 512), device=accelerator.device, dtype=torch.bool)
-                for i in range(bsz):
-                    for instruction_to_suppress in instructions_to_suppress[i]:
-                        tokens_mask[i, flux_kontext_find_substring_token_indices(orig_edit_prompts[i], instruction_to_suppress, t5_tokenizer)] = True
-                with stlora_token_mask_ctx(transformer, tokens_mask, disable_mask_after=False): # This is because of the gradient checkpointing:
-                    model_pred = transformer(
-                        hidden_states=latent_model_input,
-                        timestep=timesteps / 1000, # YiYi notes: divide it by 1000 for now because we scale it by 1000 in the transformer model
-                        guidance=guidance,
-                        pooled_projections=pooled_prompt_embeds,
-                        encoder_hidden_states=prompt_embeds,
-                        txt_ids=text_ids,
-                        img_ids=latent_ids,
-                        return_dict=False,
-                    )[0]
-                    model_pred = model_pred[:, :orig_inp_shape[1]]
+                    # Set mask
+                    tokens_mask = torch.zeros((bsz, 512), device=accelerator.device, dtype=torch.bool)
+                    for i in range(bsz):
+                        for instruction_to_suppress in instructions_to_suppress[i]:
+                            tokens_mask[i, flux_kontext_find_substring_token_indices(orig_edit_prompts[i], instruction_to_suppress, t5_tokenizer)] = True
+                    with stlora_token_mask_ctx(transformer, tokens_mask, disable_mask_after=False): # This is because of the gradient checkpointing:
+                        model_pred = transformer(
+                            hidden_states=latent_model_input,
+                            timestep=timesteps / 1000, # YiYi notes: divide it by 1000 for now because we scale it by 1000 in the transformer model
+                            guidance=guidance,
+                            pooled_projections=pooled_prompt_embeds,
+                            encoder_hidden_states=prompt_embeds,
+                            txt_ids=text_ids,
+                            img_ids=latent_ids,
+                            return_dict=False,
+                        )[0]
+                        model_pred = model_pred[:, :orig_inp_shape[1]]
 
-                weighting = compute_loss_weighting_for_sd3(weighting_scheme="none", sigmas=sigmas) # TODO: make it argument (same as the one used in compute_density_for_timestep_sampling)
-                target = gt_model_pred_neutral # instead of (noise - model_input)
-                loss = torch.mean(
-                    (weighting.float() * (model_pred.float() - target.float()) ** 2).reshape(target.shape[0], -1),
-                    1,
-                )
-                loss = loss.mean()
+                    weighting = compute_loss_weighting_for_sd3(weighting_scheme="none", sigmas=sigmas) # TODO: make it argument (same as the one used in compute_density_for_timestep_sampling)
+                    target = gt_model_pred_neutral # instead of (noise - model_input)
+                    loss = torch.mean(
+                        (weighting.float() * (model_pred.float() - target.float()) ** 2).reshape(target.shape[0], -1),
+                        1,
+                    )
+                    loss = loss.mean()
 
-                accelerator.backward(loss)
+                    accelerator.backward(loss)
+
+                    if accelerator.sync_gradients:
+                        accelerator.clip_grad_norm_(transformer.parameters(), args.max_grad_norm)
+
+                    optimizer.step()
+                    lr_scheduler.step()
+                    optimizer.zero_grad()
 
                 if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(transformer.parameters(), args.max_grad_norm)
+                    progress_bar.update(1)
+                    global_step += 1
 
-                optimizer.step()
-                lr_scheduler.step()
-                optimizer.zero_grad()
+                    if accelerator.is_main_process:
+                        if global_step % args.checkpointing_steps == 0 or global_step == args.max_train_steps:
+                            save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+                            accelerator.save_state(save_path)
+                            print(f"Saved state to {save_path}")
 
-            if accelerator.sync_gradients:
-                progress_bar.update(1)
-                global_step += 1
+                        if global_step % args.validation_steps == 0 or global_step == args.max_train_steps:
+                            pipeline.transformer = accelerator.unwrap_model(transformer, keep_fp32_wrapper=False)
+                            log_validation(pipeline, args, accelerator)
+                            transformer.train()
+                            # TODO: Check if the trainable params are in float32
 
-                if accelerator.is_main_process:
-                    if global_step % args.checkpointing_steps == 0 or global_step == args.max_train_steps:
-                        save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
-                        accelerator.save_state(save_path)
-                        print(f"Saved state to {save_path}")
+                logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
+                progress_bar.set_postfix(**logs)
+                accelerator.log(logs, step=global_step)
 
-                    if global_step % args.validation_steps == 0 or global_step == args.max_train_steps:
-                        pipeline.transformer = accelerator.unwrap_model(transformer, keep_fp32_wrapper=False)
-                        log_validation(pipeline, args, accelerator)
-                        transformer.train()
-                        # TODO: Check if the trainable params are in float32
+                if global_step >= args.max_train_steps:
+                    break    
 
-            logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
-            progress_bar.set_postfix(**logs)
-            accelerator.log(logs, step=global_step)
-
-            if global_step >= args.max_train_steps:
-                break    
+    except KeyboardInterrupt:
+        print("\n[!] Training gracefully stopped by user via Ctrl+C. Exiting safely...")
+        return
 
     accelerator.end_training()
 
