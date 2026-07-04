@@ -52,6 +52,11 @@ class SelectiveLoRALinear(nn.Module):
 
         y = self.base(x)
 
+        # Ensure LoRA weights are on the same GPU/device as the incoming data x
+        if self.lora_A.weight.device != x.device:
+            self.lora_A = self.lora_A.to(x.device)
+            self.lora_B = self.lora_B.to(x.device)
+
         y_prev_dtype = y.dtype
         if y.dtype != self.lora_A.weight.dtype:
             x = x.to(self.lora_A.weight.dtype)

@@ -34,6 +34,15 @@ from transformers import BitsAndBytesConfig
 
 from slideredit.pipelines import SliderEditFluxKontextPipeline, LoRAAdapterType
 
+import logging
+import warnings
+
+# Disable standard python warnings
+warnings.filterwarnings("ignore")
+
+# Force diffusers and transformers loggers to shut up completely
+logging.getLogger("diffusers").setLevel(logging.ERROR)
+logging.getLogger("transformers").setLevel(logging.ERROR)
 
 class CustomMultiEditInstructionDataset(Dataset):
     def __init__(self, images_dir, single_edit_prompts, max_num_instructions_per_prompt):
@@ -253,53 +262,82 @@ def get_save_model_hook(accelerator):
 
 def get_load_model_hook(accelerator):
     def load_model_hook(models, input_dir):
-        assert len(models) == 1, "Only transformer should be passed to the load hook"
-        transformer = models.pop()
+#        assert len(models) == 1, "Only transformer should be passed to the load hook"
+#        transformer = models.pop()
+#        missing, unexpected = transformer.load_state_dict(torch.load(os.path.join(input_dir, "selective_lora.pt"), map_location=accelerator.device), strict=False)
+#        if len(unexpected) > 0:
+#            raise Exception(f"Unexpected keys found when loading the model: {unexpected}.")
+#        cast_training_params([transformer], dtype=torch.float32)
+#        print(f"[Loading checkpoint Successful] Loaded LoRA weights from {os.path.join(input_dir, 'selective_lora.pt')}, {len(missing)} missing keys.")
+ 
+         # Find and extract the transformer model from the models list dynamically
+        if not models or len(models) == 0:
+            return
+
+        transformer = None
+        for i, m in enumerate(models):
+            if hasattr(m, "load_state_dict"):
+                transformer = models.pop(i)
+                break
+        
+        # Fallback safeguard if the class name didn't match perfectly
+        if transformer is None and len(models) > 0:
+            transformer = models.pop(0)
+            
+        if transformer is None:
+            raise Exception(f"Could not find the model to load. Current models array size: {len(models)}")
+
         missing, unexpected = transformer.load_state_dict(torch.load(os.path.join(input_dir, "selective_lora.pt"), map_location=accelerator.device), strict=False)
         if len(unexpected) > 0:
             raise Exception(f"Unexpected keys found when loading the model: {unexpected}.")
+        transformer.to(accelerator.device)
         cast_training_params([transformer], dtype=torch.float32)
         print(f"[Loading checkpoint Successful] Loaded LoRA weights from {os.path.join(input_dir, 'selective_lora.pt')}, {len(missing)} missing keys.")
-    
+   
     return load_model_hook
 
 
 def log_validation(pipeline: SliderEditFluxKontextPipeline, args, accelerator):
-    print("Running validation...")
+    if accelerator.is_main_process:
+        print("Running validation on main process...")
 
     images_arr = []
     captions = []
-    with nullcontext():
-        for i, prompt_pair in tqdm(enumerate(args.validation_prompts)):
-            prompt = " and ".join(prompt_pair)
-            captions.append(prompt)
-            images_arr.append([])
-            validation_image = Image.open(args.validation_images[i])
-            for lora_scale_0, lora_scale_1 in itertools.product(args.validation_lora_scales, repeat=2):
-                images_arr[-1].append(pipeline(
-                    image=validation_image,
-                    prompt=prompt,
-                    width=1024,
-                    height=1024,
-                    generator=torch.Generator(device=accelerator.device).manual_seed(args.seed),
-                    subprompts_list=prompt_pair,
-                    slider_alpha_list=[lora_scale_0, lora_scale_1],
-                ).images[0].resize((512, 512)))
-            captions.append(prompt)
+    if accelerator.is_main_process:
+        with nullcontext():
+            for i, prompt_pair in tqdm(enumerate(args.validation_prompts)):
+                prompt = " and ".join(prompt_pair)
+                captions.append(prompt)
+                images_arr.append([])
+                validation_image = Image.open(args.validation_images[i])
+                for lora_scale_0, lora_scale_1 in itertools.product(args.validation_lora_scales, repeat=2):
+                    images_arr[-1].append(pipeline(
+                        image=validation_image,
+                        prompt=prompt,
+                        width=1024,
+                        height=1024,
+                        generator=torch.Generator(device=accelerator.device).manual_seed(args.seed),
+                        subprompts_list=prompt_pair,
+                        slider_alpha_list=[lora_scale_0, lora_scale_1],
+                    ).images[0].resize((512, 512)))
+                captions.append(prompt)
     
-        for m in pipeline.transformer.modules():
-            if isinstance(m, SelectiveLoRALinear):
-                m.reset_scaling()
+    for m in pipeline.transformer.modules():
+        if isinstance(m, SelectiveLoRALinear):
+            m.reset_scaling()
     
-    accelerator.trackers[0].log({
-        "validation": [
-            wandb.Image(
-                make_image_grid(images, rows=len(args.validation_lora_scales), cols=len(args.validation_lora_scales)),
-                caption=prompt
-            )
-            for images, prompt in zip(images_arr, captions)
-        ],
-    })
+    if accelerator.is_main_process:
+        accelerator.trackers[0].log({
+            "validation": [
+                wandb.Image(
+                    make_image_grid(images, rows=len(args.validation_lora_scales), cols=len(args.validation_lora_scales)),
+                    caption=prompt
+                )
+                for images, prompt in zip(images_arr, captions)
+            ],
+        })
+
+    accelerator.wait_for_everyone()
 
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -441,6 +479,14 @@ def main():
         else:
             print(f"Resuming from checkpoint {path}")
             accelerator.load_state(os.path.join(args.output_dir, path)) 
+            
+            # --- FIX OPTIMIZER DEVICE MISMATCH ---
+            print("Forcing optimizer states to the correct GPU device...")
+            for state in optimizer.state.values():
+                for k, v in state.items():
+                    if isinstance(v, torch.Tensor):
+                        state[k] = v.to(accelerator.device)
+
             global_step = int(path.split("-")[1])
             initial_global_step = global_step
             first_epoch = global_step // num_update_steps_per_epoch
@@ -521,8 +567,8 @@ def main():
                             guidance=guidance,
                             pooled_projections=pooled_prompt_embeds,
                             encoder_hidden_states=prompt_embeds,
-                            txt_ids=text_ids,
-                            img_ids=latent_ids,
+                            txt_ids=text_ids.squeeze(0) if text_ids.ndim == 3 else text_ids,
+                            img_ids=latent_ids.squeeze(0) if latent_ids.ndim == 3 else latent_ids,
                             return_dict=False,
                         )[0]
                         model_pred = model_pred[:, :orig_inp_shape[1]]
