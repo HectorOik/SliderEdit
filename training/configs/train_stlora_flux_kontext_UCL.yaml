@@ -47,7 +47,7 @@ pretrained_model_name_or_path: "black-forest-labs/FLUX.1-Kontext-dev"
 
 seed: 0
 checkpointing_steps: 50
-validation_steps: 100
+validation_steps: 200
 validation_prompts:
   - ["make the skin dark", "make the person cry"]
   - ["add makeup to the person", "make the hair curly"]

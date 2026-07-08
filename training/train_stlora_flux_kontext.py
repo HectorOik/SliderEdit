@@ -305,11 +305,15 @@ def log_validation(pipeline: SliderEditFluxKontextPipeline, args, accelerator):
     captions = []
     if accelerator.is_main_process:
         with nullcontext():
-            for i, prompt_pair in tqdm(enumerate(args.validation_prompts)):
+	    for validation_img_path, prompt_pair in tqdm(zip(args.validation_images, args.validation_prompts), total=len(args.validation_images)):
+            # for i, prompt_pair in tqdm(enumerate(args.validation_prompts)):
                 prompt = " and ".join(prompt_pair)
-                captions.append(prompt)
+		img_name = validation_img_path.split('/')[-1]
+                captions.append(f"Image: {img_name} | Prompt: {prompt}")
+#                captions.append(prompt)
                 images_arr.append([])
-                validation_image = Image.open(args.validation_images[i])
+                # validation_image = Image.open(args.validation_images[i])
+		validation_image = Image.open(validation_img_path)
                 for lora_scale_0, lora_scale_1 in itertools.product(args.validation_lora_scales, repeat=2):
                     images_arr[-1].append(pipeline(
                         image=validation_image,
@@ -320,7 +324,7 @@ def log_validation(pipeline: SliderEditFluxKontextPipeline, args, accelerator):
                         subprompts_list=prompt_pair,
                         slider_alpha_list=[lora_scale_0, lora_scale_1],
                     ).images[0].resize((512, 512)))
-                captions.append(prompt)
+                # captions.append(prompt)
     
     for m in pipeline.transformer.modules():
         if isinstance(m, SelectiveLoRALinear):
@@ -584,7 +588,8 @@ def main():
                     accelerator.backward(loss)
 
                     if accelerator.sync_gradients:
-                        accelerator.clip_grad_norm_(transformer.parameters(), args.max_grad_norm)
+                        grad_norm = accelerator.clip_grad_norm_(transformer.parameters(), args.max_grad_norm)
+			current_grad_norm = grad_norm.item() if hasattr(grad_norm, "item") else grad_norm
 
                     optimizer.step()
                     lr_scheduler.step()
@@ -607,6 +612,23 @@ def main():
                             # TODO: Check if the trainable params are in float32
 
                 logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
+
+		# Adding more logs for wandb to help judge for convergence
+		
+		# Delta Weight Magnitude (should rise quickly initially and eventually plateau)
+		lora_mag = 0.0
+		num_layers = 0.0
+		for name, param in transformer.named_parameters():
+   		     if "lora" in name and param.requires_grad:
+        		lora_mag += param.data.norm(2).item()
+       			num_layers += 1
+
+		if num_layers > 0:
+		    logs["metrics/lora_weight_norm_avg"] = lora_mag / num_layers
+
+		if 'current_grad_norm' in locals():
+                    logs["metrics/grad_norm"] = current_grad_norm
+
                 progress_bar.set_postfix(**logs)
                 accelerator.log(logs, step=global_step)
 
