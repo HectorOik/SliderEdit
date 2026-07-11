@@ -313,7 +313,7 @@ def log_validation(pipeline: SliderEditFluxKontextPipeline, args, accelerator):
                 # captions.append(prompt)
                 images_arr.append([])
                 # validation_image = Image.open(args.validation_images[i])
-        validation_image = Image.open(validation_img_path)
+                validation_image = Image.open(validation_img_path)
                 for lora_scale_0, lora_scale_1 in itertools.product(args.validation_lora_scales, repeat=2):
                     images_arr[-1].append(pipeline(
                         image=validation_image,
