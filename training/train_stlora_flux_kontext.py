@@ -305,12 +305,12 @@ def log_validation(pipeline: SliderEditFluxKontextPipeline, args, accelerator):
     captions = []
     if accelerator.is_main_process:
         with nullcontext():
-	    for validation_img_path, prompt_pair in tqdm(zip(args.validation_images, args.validation_prompts), total=len(args.validation_images)):
+            for validation_img_path, prompt_pair in tqdm(zip(args.validation_images, args.validation_prompts), total=len(args.validation_images)):
             # for i, prompt_pair in tqdm(enumerate(args.validation_prompts)):
                 prompt = " and ".join(prompt_pair)
-		img_name = validation_img_path.split('/')[-1]
+                img_name = validation_img_path.split('/')[-1]
                 captions.append(f"Image: {img_name} | Prompt: {prompt}")
-#                captions.append(prompt)
+                # captions.append(prompt)
                 images_arr.append([])
                 # validation_image = Image.open(args.validation_images[i])
 		validation_image = Image.open(validation_img_path)
