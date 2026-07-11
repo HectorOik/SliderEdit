@@ -589,7 +589,7 @@ def main():
 
                     if accelerator.sync_gradients:
                         grad_norm = accelerator.clip_grad_norm_(transformer.parameters(), args.max_grad_norm)
-            current_grad_norm = grad_norm.item() if hasattr(grad_norm, "item") else grad_norm
+                        current_grad_norm = grad_norm.item() if hasattr(grad_norm, "item") else grad_norm
 
                     optimizer.step()
                     lr_scheduler.step()
@@ -598,6 +598,23 @@ def main():
                 if accelerator.sync_gradients:
                     progress_bar.update(1)
                     global_step += 1
+
+                    lora_mag = 0.0
+                    num_layers = 0
+                    for name, param in transformer.named_parameters():
+                        if "lora" in name and param.requires_grad:
+                            lora_mag += param.data.norm(2).item()
+                            num_layers += 1
+
+                    logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
+                    
+                    if num_layers > 0:
+                        logs["metrics/lora_weight_norm_avg"] = lora_mag / num_layers
+                    if 'current_grad_norm' in locals():
+                        logs["metrics/grad_norm"] = current_grad_norm
+
+                    progress_bar.set_postfix(**logs)
+                    accelerator.log(logs, step=global_step)
 
                     if accelerator.is_main_process:
                         if global_step % args.checkpointing_steps == 0 or global_step == args.max_train_steps:
@@ -611,29 +628,7 @@ def main():
                             transformer.train()
                             # TODO: Check if the trainable params are in float32
 
-                logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
-
-        # Adding more logs for wandb to help judge for convergence
-        
-        # Delta Weight Magnitude (should rise quickly initially and eventually plateau)
-        lora_mag = 0.0
-        num_layers = 0.0
-        for name, param in transformer.named_parameters():
-             if "lora" in name and param.requires_grad:
-                lora_mag += param.data.norm(2).item()
-                num_layers += 1
-
-        if num_layers > 0:
-            logs["metrics/lora_weight_norm_avg"] = lora_mag / num_layers
-
-        if 'current_grad_norm' in locals():
-                    logs["metrics/grad_norm"] = current_grad_norm
-
-                progress_bar.set_postfix(**logs)
-                accelerator.log(logs, step=global_step)
-
-                if global_step >= args.max_train_steps:
-                    break    
+                # logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
 
     except KeyboardInterrupt:
         print("\n[!] Training gracefully stopped by user via Ctrl+C. Exiting safely...")
