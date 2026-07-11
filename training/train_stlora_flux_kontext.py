@@ -315,6 +315,11 @@ def log_validation(pipeline: SliderEditFluxKontextPipeline, args, accelerator):
                 # validation_image = Image.open(args.validation_images[i])
                 validation_image = Image.open(validation_img_path)
                 for lora_scale_0, lora_scale_1 in itertools.product(args.validation_lora_scales, repeat=2):
+
+                    for m in pipeline.transformer.modules():
+                        if isinstance(m, SelectiveLoRALinear):
+                            m.reset_scaling(lora_scale_0, lora_scale_1)
+
                     images_arr[-1].append(pipeline(
                         image=validation_image,
                         prompt=prompt,
