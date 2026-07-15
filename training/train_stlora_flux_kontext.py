@@ -298,59 +298,53 @@ def get_load_model_hook(accelerator):
 
 
 def log_validation(pipeline: SliderEditFluxKontextPipeline, args, accelerator):
-    if accelerator.is_main_process:
-        print("Running validation on main process...")
+    print("Running validation...")
 
-    images_arr = []
-    captions = []
-    if accelerator.is_main_process:
-        with nullcontext():
-            for validation_img_path, prompt_pair in tqdm(zip(args.validation_images, args.validation_prompts), total=len(args.validation_images)):
-            # for i, prompt_pair in tqdm(enumerate(args.validation_prompts)):
-                prompt = " and ".join(prompt_pair)
-                img_name = validation_img_path.split('/')[-1]
-                captions.append(f"Image: {img_name} | Prompt: {prompt}")
-                # captions.append(prompt)
-                images_arr.append([])
-                # validation_image = Image.open(args.validation_images[i])
-                validation_image = Image.open(validation_img_path)
-                for lora_scale_0, lora_scale_1 in itertools.product(args.validation_lora_scales, repeat=2):
-
-                    for m in pipeline.transformer.modules():
-                        if isinstance(m, SelectiveLoRALinear):
-                            m.set_scaling(lora_scale_0, lora_scale_1)
-
-                    images_arr[-1].append(pipeline(
-                        image=validation_image,
-                        prompt=prompt,
-                        width=1024,
-                        height=1024,
-                        generator=torch.Generator(device=accelerator.device).manual_seed(args.seed),
-                        subprompts_list=prompt_pair,
-                        slider_alpha_list=[lora_scale_0, lora_scale_1],
-                    ).images[0].resize((512, 512)))
-                # captions.append(prompt)
-    
+    # EDIT: Clear any existing token masks before validation to avoid unintended behavior
     for m in pipeline.transformer.modules():
         if isinstance(m, SelectiveLoRALinear):
             m.reset_scaling()
-    
-    if accelerator.is_main_process:
-        accelerator.trackers[0].log({
-            "validation": [
-                wandb.Image(
-                    make_image_grid(images, rows=len(args.validation_lora_scales), cols=len(args.validation_lora_scales)),
-                    caption=prompt
-                )
-                for images, prompt in zip(images_arr, captions)
-            ],
-        })
+            m.set_token_mask(None)
 
-    accelerator.wait_for_everyone()
+    images_arr = []
+    captions = []
+    with nullcontext():
+        for i, prompt_pair in tqdm(enumerate(args.validation_prompts)):
+            prompt = " and ".join(prompt_pair)
+            captions.append(prompt)
+            images_arr.append([])
+            validation_image = Image.open(args.validation_images[i])
+            for lora_scale_0, lora_scale_1 in itertools.product(args.validation_lora_scales, repeat=2):
+                images_arr[-1].append(pipeline(
+                    image=validation_image,
+                    prompt=prompt,
+                    width=1024,
+                    height=1024,
+                    generator=torch.Generator(device=accelerator.device).manual_seed(args.seed),
+                    subprompts_list=prompt_pair,
+                    slider_alpha_list=[lora_scale_0, lora_scale_1],
+                ).images[0].resize((512, 512)))
+            # EDIT: removed second prompt because otherwise prompt indices misalign with target images
+            # captions.append(prompt)
+    
+        for m in pipeline.transformer.modules():
+            if isinstance(m, SelectiveLoRALinear):
+                m.reset_scaling()
+                # EDITl: Clear validation masks so that training starts fresh
+                m.set_token_mask(None)
+    
+    accelerator.trackers[0].log({
+        "validation": [
+            wandb.Image(
+                make_image_grid(images, rows=len(args.validation_lora_scales), cols=len(args.validation_lora_scales)),
+                caption=prompt
+            )
+            for images, prompt in zip(images_arr, captions)
+        ],
+    })
 
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-
 
 def parse_args(print_args=False):
     parser = argparse.ArgumentParser()
@@ -564,11 +558,12 @@ def main():
                         if isinstance(m, SelectiveLoRALinear):
                             m.reset_scaling()
 
-                    # Set mask
+                    # Set mask (which tokens to apply sliders for)
                     tokens_mask = torch.zeros((bsz, 512), device=accelerator.device, dtype=torch.bool)
-                    for i in range(bsz):
+                    for i in range(bsz): # find which token indices match the words we want to edit (instructions for sliders)
                         for instruction_to_suppress in instructions_to_suppress[i]:
                             tokens_mask[i, flux_kontext_find_substring_token_indices(orig_edit_prompts[i], instruction_to_suppress, t5_tokenizer)] = True
+                    # apply this mask using context manager while running transformer
                     with stlora_token_mask_ctx(transformer, tokens_mask, disable_mask_after=False): # This is because of the gradient checkpointing:
                         model_pred = transformer(
                             hidden_states=latent_model_input,
