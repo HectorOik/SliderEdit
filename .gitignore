@@ -47,7 +47,7 @@ local_reqs.txt
 
 # Data
 data/
-datasets/
+# datasets/
 checkpoints/
 experiments/
 logs/
