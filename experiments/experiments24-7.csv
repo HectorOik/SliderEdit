@@ -1,0 +1,21 @@
+id,domain,subprompt_1,subprompt_2,seed,base_prompt,test_focus
+typo_01,Typography,make font serif,make stroke thicker,101,"the word 'THESIS' written in clean bold white sans-serif letters on a solid dark gray background, vector style",Geometric continuity and sharp edge preservation
+typo_02,Typography,make the text stroke thicker,make the neon glow brighter,102,"a neon sign spelling 'OPEN' on a brick wall, high contrast, studio lighting",Local geometry vs global illumination disentanglement
+typo_03,Typography,make the letter italic,add decorative flourishes,103,"a minimal logo of the letter 'A' on a white background, sharp geometric lines",Shear and affine transformation monotonicity
+typo_04,Typography,make font gothic blackletter,make text three dimensional,104,"the word 'DESIGN' printed in clean minimalist typography on textured paper",Complex typographic style transition and depth extrusion
+typo_05,Typography,make letter spacing wider,add drop shadow effect,105,"the single word 'SLIDER' in bold uppercase modern typeface centered on plain background",Kerning and spatial separation vs shadow casting
+fashion_01,Fashion,make garment denim,make the shirt oversized,201,"a fashion model wearing a plain cotton crewneck t-shirt standing in a minimalist studio",Texture vs silhouette disentanglement
+fashion_02,Fashion,make blazer longer,add gold buttons,202,"full body shot of a woman wearing a tailored formal blazer on a neutral background",Boundary and occlusion continuity
+fashion_03,Fashion,make high-top,make the sole thicker platform,203,"a casual sneaker on a plain white background, product photograph",Structural deformations and proportion scaling
+fashion_04,Fashion,make dress silk satin texture,make dress floral patterned,204,"a minimalist elegant evening gown on a mannequin in a studio setting",Surface reflectivity vs complex pattern overlay
+fashion_05,Fashion,add leather jacket over shirt,make jeans distressed torn,205,"streetwear fashion model wearing plain t-shirt and blue jeans",Layering addition vs local material destruction
+portrait_01,Portraits,make older,make the person smile wider,301,"portrait photo of a young woman with a neutral expression, soft studio lighting",Prior leakage and identity invariance
+portrait_02,Portraits,make hair curly,add facial beard,302,"portrait photo of a man with short brown hair looking at the camera",Local feature emergence and skin boundary interactions
+portrait_03,Portraits,make eye color blue,add reading glasses,303,"headshot of an adult person with neutral expression and dark eyes",Micro-feature alteration vs object occlusion on face
+portrait_04,Portraits,make facial expression angry,make lighting dramatic chiaroscuro,304,"studio portrait of a person looking directly forward",Emotion geometry vs environmental lighting coupling
+product_01,Product Design,make antique carved,add leather padded cushions,401,"a modern wooden dining chair on a clean studio background",Complex texture and material density scaling
+product_02,Product Design,make watch case gold,make watch strap leather,402,"a modern minimalist stainless steel wristwatch on a plain slate background",Multi-component material substitution
+product_03,Product Design,make body metallic chrome,add retro vintage dials,403,"a modern compact camera on a plain wooden tabletop",Reflectivity scaling vs hardware feature addition
+scene_01,Scene / Light,warm sunset lighting,add a potted plant in corner,501,"a clean minimalist living room with a plain sofa, large window",Global illumination vs spatial object emergence
+scene_02,Scene / Light,make weather rainy and wet,add street streetlights glowing,502,"an empty urban street scene at twilight with asphalt road and buildings",Surface reflection physics vs localized light source addition
+scene_03,Scene / Light,make season winter snow covered,add dense fog,503,"a pine forest landscape with a winding dirt path",Global environmental transformation and atmospheric density
