@@ -53,6 +53,7 @@ checkpoints/
 logs/
 outputs/
 wandb/
+dummy_images/
 
 # OS
 .DS_Store
