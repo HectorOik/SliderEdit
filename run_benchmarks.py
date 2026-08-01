@@ -21,7 +21,7 @@ class MockPipeline:
 
 def load_dataset(mapping_file_path_or_dir, images_dir, dataset_type, start_idx=0, end_idx=None):
     """
-    Parses dataset sources (Parquet files for PIE-bench or JSON mapping files for other datasets) and slices the workload.
+    Parses dataset sources (Parquet files with embedded/referenced images for PIE-bench or JSON files for rs-objects) and slices the workload.
     """
     dataset = []
     
@@ -30,7 +30,6 @@ def load_dataset(mapping_file_path_or_dir, images_dir, dataset_type, start_idx=0
         print(f"Loading PIE-bench from parquet files under {mapping_file_path_or_dir}...")
         import pandas as pd
         
-        # If a directory was provided, search for all parquet files inside it
         if os.path.isdir(mapping_file_path_or_dir):
             parquet_files = glob.glob(os.path.join(mapping_file_path_or_dir, "**/*.parquet"), recursive=True)
         else:
@@ -41,16 +40,37 @@ def load_dataset(mapping_file_path_or_dir, images_dir, dataset_type, start_idx=0
             
         for p_file in parquet_files:
             df = pd.read_parquet(p_file)
-            for _, row in df.iterrows():
-                # PIE-bench parquet fields verified: 'id', 'path', 'source_prompt', 'target_prompt'
-                sample_id = str(row.get("id", ""))
-                img_filename = str(row.get("path", f"{sample_id}.jpg"))
+            for idx, row in df.iterrows():
+                sample_id = str(row.get("id", f"sample_{idx}"))
                 target_prompt = str(row.get("target_prompt", ""))
                 source_prompt = str(row.get("source_prompt", ""))
                 
+                # Extract embedded image bytes from parquet if available
+                img_obj = row.get("image", None)
+                img_path = None
+                
+                if isinstance(img_obj, dict) and "bytes" in img_obj:
+                    img_bytes = img_obj["bytes"]
+                    temp_img_dir = os.path.join(images_dir, "_extracted_cache")
+                    os.makedirs(temp_img_dir, exist_ok=True)
+                    img_path = os.path.join(temp_img_dir, f"{sample_id}.jpg")
+                    if not os.path.exists(img_path):
+                        with open(img_path, "wb") as f_img:
+                            f_img.write(img_bytes)
+                elif isinstance(img_obj, bytes):
+                    temp_img_dir = os.path.join(images_dir, "_extracted_cache")
+                    os.makedirs(temp_img_dir, exist_ok=True)
+                    img_path = os.path.join(temp_img_dir, f"{sample_id}.jpg")
+                    if not os.path.exists(img_path):
+                        with open(img_path, "wb") as f_img:
+                            f_img.write(img_obj)
+                else:
+                    img_filename = str(row.get("path", f"{sample_id}.jpg"))
+                    img_path = os.path.join(images_dir, img_filename)
+
                 dataset.append({
                     "id": sample_id, 
-                    "filename": img_filename, 
+                    "image_path": img_path, 
                     "prompt": target_prompt,
                     "source_prompt": source_prompt
                 })
@@ -65,11 +85,13 @@ def load_dataset(mapping_file_path_or_dir, images_dir, dataset_type, start_idx=0
                 img_filename = item.get("image", item.get("image_id", ""))
                 prompt = item.get("text", item.get("prompt", ""))
                 clean_id = os.path.splitext(os.path.basename(img_filename))[0]
-                dataset.append({"id": clean_id, "filename": img_filename, "prompt": prompt, "source_prompt": ""})
+                image_path = os.path.join(images_dir, img_filename)
+                dataset.append({"id": clean_id, "image_path": image_path, "prompt": prompt, "source_prompt": ""})
         elif isinstance(mapping_data, dict):
             for img_filename, prompt in mapping_data.items():
                 clean_id = os.path.splitext(os.path.basename(img_filename))[0]
-                dataset.append({"id": clean_id, "filename": img_filename, "prompt": prompt, "source_prompt": ""})
+                image_path = os.path.join(images_dir, img_filename)
+                dataset.append({"id": clean_id, "image_path": image_path, "prompt": prompt, "source_prompt": ""})
 
     # 2. Slicing Logic for Multi-GPU
     sliced_dataset = dataset[start_idx:end_idx] if end_idx is not None else dataset[start_idx:]
@@ -78,7 +100,7 @@ def load_dataset(mapping_file_path_or_dir, images_dir, dataset_type, start_idx=0
     # 3. Path Validation with Extension Fallback (.jpg <-> .png)
     valid_dataset = []
     for data in sliced_dataset:
-        image_path = os.path.join(images_dir, data["filename"])
+        image_path = data["image_path"]
         
         if not os.path.exists(image_path):
             base_path, ext = os.path.splitext(image_path)
@@ -151,6 +173,8 @@ def main(args):
 
     # Load Dataset Slice
     dataset = load_dataset(args.mapping_file, args.images_dir, args.dataset_type, start_idx=args.start_idx, end_idx=args.end_idx)
+    
+    # Progressing from extrapolation (-1.0) to full application (0.0) to full suppression (1.0)
     alpha_values = [1.0, 0.5, 0.0, -0.5, -1.0]
 
     print(f"Starting generation for {len(dataset)} images...")
@@ -189,7 +213,7 @@ if __name__ == "__main__":
     
     # Dataset Arguments
     parser.add_argument("--dataset_type", type=str, choices=["pie-bench", "rs-objects"], required=True, help="Which dataset logic to use")
-    parser.add_argument("--mapping_file", type=str, required=True, help="Path to mapping_file.json or PIE-bench parquet folder directory")
+    parser.add_argument("--mapping_file", type=str, required=True, help="Path to mapping file or PIE-bench parquet folder directory")
     parser.add_argument("--images_dir", type=str, required=True, help="Path to source images folder")
     parser.add_argument("--start_idx", type=int, default=0, help="Start image index")
     parser.add_argument("--end_idx", type=int, default=None, help="End image index (exclusive)")
