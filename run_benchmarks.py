@@ -1,6 +1,7 @@
 import torch
 import os
 import json
+import glob
 import argparse
 from PIL import Image
 from tqdm import tqdm
@@ -13,49 +14,62 @@ from slideredit.pipelines import SliderEditFluxKontextPipeline, LoRAAdapterType
 # for debugging purposes
 class MockPipeline:
     def __call__(self, image, prompt, generator, slider_alpha):
-        # Returns a dummy object mimicking diffusers pipeline output: output.images[0]
         class DummyOutput:
             def __init__(self, img):
-                # Simply return a copy of the input image (or a blank thumbnail)
                 self.images = [img.copy()]
         return DummyOutput(image)
 
-def load_dataset(mapping_file_path, images_dir, dataset_type, start_idx=0, end_idx=None):
+def load_dataset(mapping_file_path_or_dir, images_dir, dataset_type, start_idx=0, end_idx=None):
     """
-    Parses JSON mapping files based on the dataset type and slices the workload.
+    Parses dataset sources (Parquet files for PIE-bench or JSON mapping files for other datasets) and slices the workload.
     """
-    print(f"Loading {dataset_type} mapping from {mapping_file_path}...")
-    with open(mapping_file_path, 'r') as f:
-        mapping_data = json.load(f)
-        
     dataset = []
     
     # 1. Parsing Logic
     if dataset_type == "pie-bench":
-        # PIE-Bench: {"image_name": {"editing_instruction": "...", ...}}
-        for image_key, meta in mapping_data.items():
-            base_id, ext = os.path.splitext(image_key)
-            # Default to .jpg if no extension provided in the key
-            img_filename = image_key if ext else f"{image_key}.jpg"
-            clean_id = base_id if ext else image_key
+        print(f"Loading PIE-bench from parquet files under {mapping_file_path_or_dir}...")
+        import pandas as pd
+        
+        # If a directory was provided, search for all parquet files inside it
+        if os.path.isdir(mapping_file_path_or_dir):
+            parquet_files = glob.glob(os.path.join(mapping_file_path_or_dir, "**/*.parquet"), recursive=True)
+        else:
+            parquet_files = [mapping_file_path_or_dir]
             
-            prompt = meta.get("editing_instruction", meta.get("prompt", ""))
-            dataset.append({"id": clean_id, "filename": img_filename, "prompt": prompt})
+        if not parquet_files:
+            raise FileNotFoundError(f"No parquet files found for PIE-bench at {mapping_file_path_or_dir}")
             
+        for p_file in parquet_files:
+            df = pd.read_parquet(p_file)
+            for _, row in df.iterrows():
+                # PIE-bench parquet fields verified: 'id', 'path', 'source_prompt', 'target_prompt'
+                sample_id = str(row.get("id", ""))
+                img_filename = str(row.get("path", f"{sample_id}.jpg"))
+                target_prompt = str(row.get("target_prompt", ""))
+                source_prompt = str(row.get("source_prompt", ""))
+                
+                dataset.append({
+                    "id": sample_id, 
+                    "filename": img_filename, 
+                    "prompt": target_prompt,
+                    "source_prompt": source_prompt
+                })
+                
     elif dataset_type == "rs-objects":
-        # Handle List format: [{"image": "01.jpg", "text": "make it red"}, ...]
+        print(f"Loading rs-objects mapping from {mapping_file_path_or_dir}...")
+        with open(mapping_file_path_or_dir, 'r') as f:
+            mapping_data = json.load(f)
+            
         if isinstance(mapping_data, list):
             for item in mapping_data:
                 img_filename = item.get("image", item.get("image_id", ""))
                 prompt = item.get("text", item.get("prompt", ""))
                 clean_id = os.path.splitext(os.path.basename(img_filename))[0]
-                dataset.append({"id": clean_id, "filename": img_filename, "prompt": prompt})
-                
-        # Handle Dict format: {"01.jpg": "make it red", ...}
+                dataset.append({"id": clean_id, "filename": img_filename, "prompt": prompt, "source_prompt": ""})
         elif isinstance(mapping_data, dict):
             for img_filename, prompt in mapping_data.items():
                 clean_id = os.path.splitext(os.path.basename(img_filename))[0]
-                dataset.append({"id": clean_id, "filename": img_filename, "prompt": prompt})
+                dataset.append({"id": clean_id, "filename": img_filename, "prompt": prompt, "source_prompt": ""})
 
     # 2. Slicing Logic for Multi-GPU
     sliced_dataset = dataset[start_idx:end_idx] if end_idx is not None else dataset[start_idx:]
@@ -66,7 +80,6 @@ def load_dataset(mapping_file_path, images_dir, dataset_type, start_idx=0, end_i
     for data in sliced_dataset:
         image_path = os.path.join(images_dir, data["filename"])
         
-        # Extension fallback check if path is missing
         if not os.path.exists(image_path):
             base_path, ext = os.path.splitext(image_path)
             alt_ext = ".png" if ext.lower() in [".jpg", ".jpeg"] else ".jpg"
@@ -81,7 +94,8 @@ def load_dataset(mapping_file_path, images_dir, dataset_type, start_idx=0, end_i
         valid_dataset.append({
             "id": data["id"],
             "image_path": image_path,
-            "prompt": data["prompt"]
+            "prompt": data["prompt"],
+            "source_prompt": data["source_prompt"]
         })
         
     return valid_dataset
@@ -116,8 +130,6 @@ def main(args):
             subfolder="text_encoder_2", 
             torch_dtype=torch.bfloat16
         ).to("cuda")
-        # quantizate after initialization
-        # t5_text_encoder.to(dtype=torch.float8_e4m3fn, device="cuda")
 
         print("Loading VAE & Transformer...")
         vae = AutoencoderKL.from_pretrained(MODEL_ID, subfolder="vae", torch_dtype=torch.bfloat16).to("cuda")
@@ -125,7 +137,6 @@ def main(args):
             MODEL_ID, 
             subfolder="transformer",
             torch_dtype=torch.bfloat16
-            #torch_dtype=torch.float8_e4m3fn
         ).to("cuda")
 
         print("Assembling Pipeline...")
@@ -178,7 +189,7 @@ if __name__ == "__main__":
     
     # Dataset Arguments
     parser.add_argument("--dataset_type", type=str, choices=["pie-bench", "rs-objects"], required=True, help="Which dataset logic to use")
-    parser.add_argument("--mapping_file", type=str, required=True, help="Path to mapping_file.json")
+    parser.add_argument("--mapping_file", type=str, required=True, help="Path to mapping_file.json or PIE-bench parquet folder directory")
     parser.add_argument("--images_dir", type=str, required=True, help="Path to source images folder")
     parser.add_argument("--start_idx", type=int, default=0, help="Start image index")
     parser.add_argument("--end_idx", type=int, default=None, help="End image index (exclusive)")
