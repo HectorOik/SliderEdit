@@ -2,6 +2,10 @@ import torch
 import time
 from huggingface_hub import login
 from PIL import Image
+import sys
+import os
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # Import BOTH configs under different names
 from transformers import CLIPTextModel, T5EncoderModel
@@ -61,7 +65,9 @@ pipe = SliderEditFluxKontextPipeline.from_pretrained(
     torch_dtype=torch.bfloat16
 )
 
-pipe.load_gstlora("./checkpoints/gstlora_iter500.safetensors")
+checkpoint_dir = "/tmp/eoikonom/SliderEdit/checkpoints/example_training_gstlora_iter500.safetensors"
+
+pipe.load_gstlora(checkpoint_dir)
 pipe.loaded_adapter = LoRAAdapterType.GSTLORA
 
 # 4. Test the generation speed

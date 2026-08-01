@@ -111,11 +111,22 @@ def main(args):
         
         print("Loading Text Encoders...")
         clip_text_encoder = CLIPTextModel.from_pretrained(MODEL_ID, subfolder="text_encoder", torch_dtype=torch.bfloat16).to("cuda")
-        t5_text_encoder = T5EncoderModel.from_pretrained(MODEL_ID, subfolder="text_encoder_2", torch_dtype=torch.float8_e4m3fn).to("cuda")
+        t5_text_encoder = T5EncoderModel.from_pretrained(
+            MODEL_ID, 
+            subfolder="text_encoder_2", 
+            torch_dtype=torch.bfloat16
+        ).to("cuda")
+        # quantizate after initialization
+        # t5_text_encoder.to(dtype=torch.float8_e4m3fn, device="cuda")
 
         print("Loading VAE & Transformer...")
         vae = AutoencoderKL.from_pretrained(MODEL_ID, subfolder="vae", torch_dtype=torch.bfloat16).to("cuda")
-        transformer = FluxTransformer2DModel.from_pretrained(MODEL_ID, subfolder="transformer", torch_dtype=torch.float8_e4m3fn).to("cuda")
+        transformer = FluxTransformer2DModel.from_pretrained(
+            MODEL_ID, 
+            subfolder="transformer",
+            torch_dtype=torch.bfloat16
+            #torch_dtype=torch.float8_e4m3fn
+        ).to("cuda")
 
         print("Assembling Pipeline...")
         pipe = SliderEditFluxKontextPipeline.from_pretrained(
@@ -129,7 +140,7 @@ def main(args):
 
     # Load Dataset Slice
     dataset = load_dataset(args.mapping_file, args.images_dir, args.dataset_type, start_idx=args.start_idx, end_idx=args.end_idx)
-    alpha_values = [1.0, 0.8, 0.6, 0.4, 0.2, 0.0, -0.2, -0.4, -0.6, -0.8, -1.0]
+    alpha_values = [1.0, 0.5, 0.0, -0.5, -1.0]
 
     print(f"Starting generation for {len(dataset)} images...")
     torch.backends.cudnn.benchmark = True 
@@ -175,7 +186,7 @@ if __name__ == "__main__":
     # Configuration Arguments
     parser.add_argument("--seed", type=int, default=42, help="Fixed random seed")
     parser.add_argument("--output_dir", type=str, default="/tmp/slideredit_outputs", help="Output directory")
-    parser.add_argument("--lora_path", type=str, default="./checkpoints/gstlora_iter500/example_training_gstlora_iter500.safetensors", help="Path to LoRA")
+    parser.add_argument("--lora_path", type=str, default="./checkpoints/example_training_gstlora_iter500.safetensors", help="Path to LoRA")
     parser.add_argument("--hf_token_path", type=str, default="./.hf_token", help="Path to HF token")
     parser.add_argument("--dry_run", action="store_true", help="Run full pipeline logic without loading models/using VRAM")
 
