@@ -6,7 +6,7 @@ import argparse
 from PIL import Image
 from tqdm import tqdm
 from huggingface_hub import login
-from transformers import CLIPTextModel, T5EncoderModel
+from transformers import CLIPTextModel, T5EncoderModel, BitsAndBytesConfig
 from diffusers import AutoencoderKL
 from diffusers.models import FluxTransformer2DModel
 from slideredit.pipelines import SliderEditFluxKontextPipeline, LoRAAdapterType
@@ -199,6 +199,8 @@ def main(args):
     else:
         print("[REAL RUN MODE] Loading models and pipeline...")
         MODEL_ID = "black-forest-labs/FLUX.1-Kontext-dev"
+
+        # ============= Quantization Logic Start ======================
         
         print("Loading Text Encoders...")
         clip_text_encoder = CLIPTextModel.from_pretrained(MODEL_ID, subfolder="text_encoder", torch_dtype=torch.bfloat16).to("cuda")
@@ -208,13 +210,24 @@ def main(args):
             torch_dtype=torch.bfloat16
         ).to("cuda")
 
-        print("Loading VAE & Transformer...")
+        print("Loading VAE...")
         vae = AutoencoderKL.from_pretrained(MODEL_ID, subfolder="vae", torch_dtype=torch.bfloat16).to("cuda")
+
+        # 4-bit quantization config for the massive Flux Transformer (~12B params)
+        quant_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16
+        )
+
+        print("⚡ Loading Quantized FLUX Transformer (4-bit NF4)...")
         transformer = FluxTransformer2DModel.from_pretrained(
             MODEL_ID, 
             subfolder="transformer",
-            torch_dtype=torch.bfloat16
-        ).to("cuda")
+            quantization_config=quant_config,
+            torch_dtype=torch.bfloat16,
+            device_map={"": "cuda"}
+        )
 
         print("Assembling Pipeline...")
         pipe = SliderEditFluxKontextPipeline.from_pretrained(
@@ -227,15 +240,9 @@ def main(args):
         pipe.set_progress_bar_config(disable=True) 
 
     # Load Dataset Slice
-<<<<<<< Updated upstream
-    dataset = load_dataset(args.mapping_file, args.images_dir, args.dataset_type, start_idx=args.start_idx, end_idx=args.end_idx)
-    
-    # Progressing from extrapolation (-1.0) to full application (0.0) to full suppression (1.0)
-=======
     # dataset = load_dataset(args.mapping_file, args.images_dir, args.dataset_type, start_idx=args.start_idx, end_idx=args.end_idx)
     dataset = load_dataset_stratified_pie_bench(args.mapping_file, args.images_dir, samples_per_category=20)
     print(f"Total stratified dataset size loaded: {len(dataset)} images.")
->>>>>>> Stashed changes
     alpha_values = [1.0, 0.5, 0.0, -0.5, -1.0]
 
     print(f"Starting generation for {len(dataset)} images...")
