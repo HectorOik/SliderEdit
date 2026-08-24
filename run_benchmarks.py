@@ -254,6 +254,7 @@ def main(args):
         
         try:
             img = Image.open(data["image_path"]).convert("RGB")
+            img = img.resize((512, 512), Image.Resampling.LANCZOS)
         except Exception as e:
             print(f"Skipping {data['id']}: Could not load image. {e}")
             continue
