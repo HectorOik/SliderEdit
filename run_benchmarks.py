@@ -124,49 +124,56 @@ def load_dataset(mapping_file_path_or_dir, images_dir, dataset_type, start_idx=0
 
 def load_dataset_stratified_pie_bench(mapping_file_path_or_dir, images_dir, samples_per_category=20):
     """
-    Loads PIE-bench and ensures a strict stratified split 
-    (e.g., first N samples from each of the 10 category subfolders/files).
+    Loads PIE-bench from parquet files with embedded image bytes and ensures a strict stratified split.
     """
     import pandas as pd
     valid_dataset = []
     
     if os.path.isdir(mapping_file_path_or_dir):
-        # Find category directories or parquet files grouped by category
         category_dirs = sorted([os.path.join(mapping_file_path_or_dir, d) for d in os.listdir(mapping_file_path_or_dir) if os.path.isdir(os.path.join(mapping_file_path_or_dir, d))])
         
-        # Fallback if parquet files are flat in a single folder
-        if not category_dirs:
-            category_dirs = [mapping_file_path_or_dir]
-            
         for cat_dir in category_dirs:
             cat_name = os.path.basename(cat_dir)
-            if cat_name.startswith('.'):  # Skip hidden dirs like .cache
+            if cat_name.startswith('.'):
                 continue
+                
             parquet_files = glob.glob(os.path.join(cat_dir, "*.parquet"))
             
             cat_samples_collected = 0
             for p_file in sorted(parquet_files):
                 df = pd.read_parquet(p_file)
-                for _, row in df.iterrows():
+                for idx, row in df.iterrows():
                     if cat_samples_collected >= samples_per_category:
                         break
                         
-                    sample_id = str(row.get("id", ""))
-                    img_filename = str(row.get("path", f"{sample_id}.jpg"))
+                    sample_id = str(row.get("id", f"sample_{idx}"))
                     target_prompt = str(row.get("target_prompt", ""))
                     source_prompt = str(row.get("source_prompt", ""))
                     
-                    # Resolve image path with extension fallback
-                    image_path = os.path.join(images_dir, img_filename)
-                    if not os.path.exists(image_path):
-                        base_path, ext = os.path.splitext(image_path)
-                        alt_ext = ".png" if ext.lower() in [".jpg", ".jpeg"] else ".jpg"
-                        image_path = base_path + alt_ext
-                        
-                    if os.path.exists(image_path):
+                    # Extract embedded image bytes from the parquet row
+                    img_obj = row.get("image", None)
+                    img_path = None
+                    
+                    temp_img_dir = os.path.join(images_dir, "_extracted_cache", cat_name)
+                    os.makedirs(temp_img_dir, exist_ok=True)
+                    img_path = os.path.join(temp_img_dir, f"{sample_id}.jpg")
+                    
+                    if not os.path.exists(img_path):
+                        if isinstance(img_obj, dict) and "bytes" in img_obj:
+                            img_bytes = img_obj["bytes"]
+                        elif isinstance(img_obj, bytes):
+                            img_bytes = img_obj
+                        else:
+                            img_bytes = None
+                            
+                        if img_bytes is not None:
+                            with open(img_path, "wb") as f_img:
+                                f_img.write(img_bytes)
+                    
+                    if os.path.exists(img_path):
                         valid_dataset.append({
                             "id": sample_id,
-                            "image_path": image_path,
+                            "image_path": img_path,
                             "prompt": target_prompt,
                             "source_prompt": source_prompt,
                             "category": cat_name
