@@ -122,6 +122,61 @@ def load_dataset(mapping_file_path_or_dir, images_dir, dataset_type, start_idx=0
         
     return valid_dataset
 
+def load_dataset_stratified_pie_bench(mapping_file_path_or_dir, images_dir, samples_per_category=20):
+    """
+    Loads PIE-bench and ensures a strict stratified split 
+    (e.g., first N samples from each of the 10 category subfolders/files).
+    """
+    import pandas as pd
+    valid_dataset = []
+    
+    if os.path.isdir(mapping_file_path_or_dir):
+        # Find category directories or parquet files grouped by category
+        category_dirs = sorted([os.path.join(mapping_file_path_or_dir, d) for d in os.listdir(mapping_file_path_or_dir) if os.path.isdir(os.path.join(mapping_file_path_or_dir, d))])
+        
+        # Fallback if parquet files are flat in a single folder
+        if not category_dirs:
+            category_dirs = [mapping_file_path_or_dir]
+            
+        for cat_dir in category_dirs:
+            cat_name = os.path.basename(cat_dir)
+            parquet_files = glob.glob(os.path.join(cat_dir, "**/*.parquet"), recursive=True)
+            
+            cat_samples_collected = 0
+            for p_file in sorted(parquet_files):
+                df = pd.read_parquet(p_file)
+                for _, row in df.iterrows():
+                    if cat_samples_collected >= samples_per_category:
+                        break
+                        
+                    sample_id = str(row.get("id", ""))
+                    img_filename = str(row.get("path", f"{sample_id}.jpg"))
+                    target_prompt = str(row.get("target_prompt", ""))
+                    source_prompt = str(row.get("source_prompt", ""))
+                    
+                    # Resolve image path with extension fallback
+                    image_path = os.path.join(images_dir, img_filename)
+                    if not os.path.exists(image_path):
+                        base_path, ext = os.path.splitext(image_path)
+                        alt_ext = ".png" if ext.lower() in [".jpg", ".jpeg"] else ".jpg"
+                        image_path = base_path + alt_ext
+                        
+                    if os.path.exists(image_path):
+                        valid_dataset.append({
+                            "id": sample_id,
+                            "image_path": image_path,
+                            "prompt": target_prompt,
+                            "source_prompt": source_prompt,
+                            "category": cat_name
+                        })
+                        cat_samples_collected += 1
+                        
+                if cat_samples_collected >= samples_per_category:
+                    break
+            print(f"Category [{cat_name}]: Loaded {cat_samples_collected} samples.")
+            
+    return valid_dataset
+
 def main(args):
     torch.manual_seed(args.seed)
 
@@ -172,9 +227,15 @@ def main(args):
         pipe.set_progress_bar_config(disable=True) 
 
     # Load Dataset Slice
+<<<<<<< Updated upstream
     dataset = load_dataset(args.mapping_file, args.images_dir, args.dataset_type, start_idx=args.start_idx, end_idx=args.end_idx)
     
     # Progressing from extrapolation (-1.0) to full application (0.0) to full suppression (1.0)
+=======
+    # dataset = load_dataset(args.mapping_file, args.images_dir, args.dataset_type, start_idx=args.start_idx, end_idx=args.end_idx)
+    dataset = load_dataset_stratified_pie_bench(args.mapping_file, args.images_dir, samples_per_category=20)
+    print(f"Total stratified dataset size loaded: {len(dataset)} images.")
+>>>>>>> Stashed changes
     alpha_values = [1.0, 0.5, 0.0, -0.5, -1.0]
 
     print(f"Starting generation for {len(dataset)} images...")
