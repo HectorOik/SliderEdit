@@ -140,7 +140,9 @@ def load_dataset_stratified_pie_bench(mapping_file_path_or_dir, images_dir, samp
             
         for cat_dir in category_dirs:
             cat_name = os.path.basename(cat_dir)
-            parquet_files = glob.glob(os.path.join(cat_dir, "**/*.parquet"), recursive=True)
+            if cat_name.startswith('.'):  # Skip hidden dirs like .cache
+                continue
+            parquet_files = glob.glob(os.path.join(cat_dir, "*.parquet"))
             
             cat_samples_collected = 0
             for p_file in sorted(parquet_files):
